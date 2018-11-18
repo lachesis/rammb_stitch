@@ -36,7 +36,7 @@ def check_auth(req):
         return True
     except Exception:
         req.set_status(401)
-        req.set_header("WWW-Authenticate", "Basic realm=rammba")
+        req.set_header("WWW-Authenticate", "Basic realm=rammb")
         req.write("Unauthorized")
         return False
 
