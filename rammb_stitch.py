@@ -8,7 +8,7 @@ import dateutil.parser
 import math
 import sys
 
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageDraw
 
 USER_AGENT = 'RAMMB-Stitch (tornado/Python 3)'
 TILE_SIZE = None  # pixels of a tile (square), set in main
@@ -70,6 +70,18 @@ def register_filter(name):
         return f
     return deco
 
+def apply_filters(img, args):
+    if not args.filters:
+        return img
+    for filter in args.filters.split(','):
+        if ':' in filter:
+            fname, fargs = filter.split(':', 1)
+            fargs = fargs.split('-')
+            img = filters[fname](img, args, *fargs)
+        else:
+            img = filters[filter](img, args)
+    return img
+
 @register_filter('scale')
 def image_filter_scale(img, args):
     width = args.width
@@ -99,19 +111,22 @@ def image_filter_trim(img, args):
         return img.crop(bbox)
     return img
 
-@register_filter('add_22_px')
-def image_filter_plus_22_px(img, args):
-    # add 22 pixels of black to the top of the image for my awesome wm toolbars
-    extra_h = 22
+@register_filter('add_px_top')
+def image_filter_add_px_top(img, args, extra_h):
+    extra_h = int(extra_h)
+    # add some extrapixels of black to the top of the image for my awesome wm toolbar
     out = Image.new(img.mode, (img.size[0], img.size[1] + extra_h), img.getpixel((0,0)))
     out.paste(im=img, box=(0, extra_h))
     return out
 
-def apply_filters(img, args):
-    if not args.filters:
-        return img
-    for filter in args.filters.split(','):
-        img = filters[filter](img, args)
+@register_filter('timestamp')
+def image_filter_timestamp(img, args):
+    timestamp = args._timestamp
+    txt = '{} @ {}'.format(args.satellite, args._timestamp)
+    draw = ImageDraw.Draw(img)
+    txt_w, txt_h = draw.textsize(txt)
+    pos = (img.size[0] - txt_w - 10, img.size[1] - txt_h - 10)
+    ImageDraw.Draw(img).text(xy=pos, text=txt, fill=(64, 64, 64))
     return img
 
 async def main():
@@ -148,6 +163,7 @@ async def main():
     images = await tornado.gen.multi([download_image(url) for url in urls])
     stitched = stitch(images)
 
+    args._timestamp = timestamp
     final = apply_filters(stitched, args)
     final.save(args.output_path)
 
