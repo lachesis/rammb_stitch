@@ -1,7 +1,9 @@
 import argparse
+import base64
 import io
 import json
 import logging
+import os
 import time
 import types
 
@@ -22,9 +24,28 @@ def safe_do(f, v, d=None):
     except Exception:
         return d
 
+def check_auth(req):
+    needed_password = os.getenv('AUTH_PASSWORD')
+    if not needed_password:
+        return True
+    try:
+        decoded = base64.b64decode(req.request.headers['Authorization'].split(' ')[1]).decode('utf-8')
+        if needed_password != decoded.split(':')[1]:
+            raise ValueError("Wrong PW")
+        req.current_user = decoded.split(':')[0]
+        return True
+    except Exception:
+        req.set_status(401)
+        req.set_header("WWW-Authenticate", "Basic realm=rammba")
+        req.write("Unauthorized")
+        return False
+
 g_tile_cache = None
 class StitchHandler(tornado.web.RequestHandler):
     async def get(self, satellite, filetype):
+        if not check_auth(self):
+            return
+
         # Pass through some arguments to the build_image function which must ducktype to argparse output equiv
         # uber-hacky, can't use namedtuple b/c monkeypatching is used to pass actual timestamp to an image filter
         identity = lambda v: v
