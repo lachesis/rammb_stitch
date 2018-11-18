@@ -4,38 +4,66 @@ import tornado
 import tornado.ioloop
 import tornado.httpclient
 import json
-import dateutil.parser
 import math
 import sys
+import io
+import logging
 
 from PIL import Image, ImageChops, ImageDraw
 
 USER_AGENT = 'RAMMB-Stitch (tornado/Python 3)'
-TILE_SIZE = None  # pixels of a tile (square), set in main
 
-def determine_zoom_level(resolution):
-    tiles_needed = math.ceil(resolution / TILE_SIZE)
+logger = logging.getLogger(__name__)
+
+def determine_zoom_level(resolution, tile_size):
+    tiles_needed = math.ceil(resolution / tile_size)
     zoom_needed = int(math.ceil(math.log(tiles_needed) / math.log(2)))
-    print("Given tile size of %s and res of %s, need zoom level %s" % (TILE_SIZE, resolution, zoom_needed), file=sys.stderr)
+    logger.debug("Given tile size of %s and res of %s, need zoom level %s", tile_size, resolution, zoom_needed)
     return zoom_needed
 
-async def download_image(url):
+async def download_image(url, tile_cache=None):
     """Download an image and return it as a PIL image"""
+    if tile_cache:
+        data = tile_cache.get(url)
+        if data:
+            return Image.open(io.BytesIO(data))
+
+    logger.info("Downloading image: %s", url)
     http = tornado.httpclient.AsyncHTTPClient()
     hreq = tornado.httpclient.HTTPRequest(url, user_agent=USER_AGENT)
     res = await http.fetch(hreq)
+
+    if tile_cache:
+        logger.debug("Storing %s bytes to cache for url %s", len(res.body), url)
+        tile_cache.put(url, res.body)
+        res.buffer.seek(0)
+
     return Image.open(res.buffer)
 
-async def download_timestamps(satellite, sector, product):
+async def download_timestamps(satellite, sector, product, tile_cache=None):
     url = 'http://rammb-slider.cira.colostate.edu/data/json/%s/%s/%s/latest_times.json' % (satellite, sector, product)
+
+    if tile_cache:
+        data = tile_cache.get(url)
+        if data:
+            return json.loads(data)['timestamps_int']
+
+    logger.info("Downloading metadata: %s", url)
     http = tornado.httpclient.AsyncHTTPClient()
     hreq = tornado.httpclient.HTTPRequest(url, user_agent=USER_AGENT)
     res = await http.fetch(hreq)
+
+    if tile_cache:
+        logger.debug("Storing %s bytes to cache for url %s", len(res.body), url)
+        tile_cache.put(url, res.body, exp=10)
+        res.buffer.seek(0)
+
     return json.load(res.buffer)['timestamps_int']
 
 def select_timestamp(target, options):
     if target == 'latest':
         return options[0]
+    #import dateutil.parser
     raise ValueError("Only 'latest' timestamp supported")
 
 def build_image_urls(satellite, sector, product, zoom, timestamp):
@@ -53,14 +81,15 @@ def build_image_urls(satellite, sector, product, zoom, timestamp):
     ) for x in range(0, max_x) for y in range(0, max_y)]
 
 def stitch(images):
-    # Assumes images are column-major squares of TILE_SIZE resolution
+    # Assumes images are column-major squares of same tile_size resolution
     tiles_on_side = int(math.sqrt(len(images)))
+    tile_size = images[0].size[0]
 
-    result = Image.new('RGB', (tiles_on_side * TILE_SIZE, tiles_on_side * TILE_SIZE))
+    result = Image.new('RGB', (tiles_on_side * tile_size, tiles_on_side * tile_size))
     for y in range(tiles_on_side):
         for x in range(tiles_on_side):
             im = images[y * tiles_on_side + x]
-            result.paste(im=im, box=(x * TILE_SIZE, y * TILE_SIZE))
+            result.paste(im=im, box=(x * tile_size, y * tile_size))
     return result
 
 filters = {}
@@ -129,43 +158,91 @@ def image_filter_timestamp(img, args):
     ImageDraw.Draw(img).text(xy=pos, text=txt, fill=(64, 64, 64))
     return img
 
-async def main():
+class LevelDBTileCache:
+    def __init__(self, filename):
+        import plyvel
+        self.db = plyvel.DB(filename, create_if_missing=True)
+
+    def get(self, url):
+        return self.db.get(url.encode('utf-8'))
+
+    def put(self, url, data, exp=None):
+        if exp:
+            return  # don't cache, we can't expire
+        self.db.put(url.encode('utf-8'), data)
+
+class MemcachedTileCache:
+    def __init__(self, hosts):
+        import pylibmc
+        logger.debug("Connecting to memcached on %r", hosts)
+        self.mc = pylibmc.Client(hosts, binary=True)
+
+    def get(self, url):
+        return self.mc.get(url.encode('utf-8'))
+
+    def put(self, url, data, exp=None):
+        self.mc.set(url.encode('utf-8'), data, time=exp or 0)
+
+async def build_image(tile_cache, args):
+    # Grab metadata and determine what timestamp to build
+    timestamps = await download_timestamps(args.satellite, args.sector, args.product, tile_cache=tile_cache)
+    timestamp = select_timestamp(args.timestamp, timestamps)
+
+    # Grab a zoom-0 tile to compute tilesize
+    urls = build_image_urls(args.satellite, args.sector, args.product, zoom=0, timestamp=timestamp)
+    assert len(urls) == 1
+    image = await download_image(urls[0], tile_cache=tile_cache)
+    assert image.size[0] == image.size[1]
+    tile_size = image.size[0]
+
+    # Compute zoom
+    zoom = args.zoom if args.zoom is not None else determine_zoom_level(max(args.width, args.height), tile_size)
+
+    # Grab the rest of the URLs, stitch, and save
+    urls = build_image_urls(args.satellite, args.sector, args.product, zoom, timestamp)
+    images = await tornado.gen.multi([download_image(url, tile_cache=tile_cache) for url in urls])
+    stitched = stitch(images)
+
+    args._timestamp = timestamp
+    final = apply_filters(stitched, args)
+
+    return final
+
+async def script_main():
     tornado.httpclient.AsyncHTTPClient.configure('tornado.simple_httpclient.SimpleAsyncHTTPClient', max_clients=4)
     parser = argparse.ArgumentParser(description="Download and stitch images from RAMMB-Slider into one large composite")
     parser.add_argument('-s', '--satellite', default='goes-16', help="Which satellite? default: goes-16")
     parser.add_argument('-c', '--sector', default='full_disk', help="Which sector? default: full_disk")
     parser.add_argument('-p', '--product', default='geocolor', help="Which product? default: geocolor")
-    parser.add_argument('-t', '--time', default='latest', help="Which timestamp? Finds nearest match from available data, default: latest")
+    parser.add_argument('-t', '--timestamp', default='latest', help="Which timestamp? Finds nearest match from available data, default: latest")
     parser.add_argument('--zoom', type=int, help="Zoom level? Highest detail is 4, lowest is 0")
     parser.add_argument('--width', type=int, default=1920, help="Output width?")
     parser.add_argument('--height', type=int, default=1080, help="Output height?")
     parser.add_argument('--filters', help='Image filters')
+    parser.add_argument('--cache-filename', help='LevelDB tile cache filename or "memcached" for 127.0.0.1 memcached')
+    parser.add_argument('-d', '--debug', action='store_true', help='Debug logging')
     parser.add_argument('output_path', help="Where to save the output?")
     args = parser.parse_args()
 
-    # Grab metadata and determine what timestamp to build
-    timestamps = await download_timestamps(args.satellite, args.sector, args.product)
-    timestamp = select_timestamp(args.time, timestamps)
+    if args.debug:
+        logging.basicConfig()
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger('PIL').setLevel(logging.ERROR)
 
-    # Grab a zoom-0 tile to compute tilesize
-    urls = build_image_urls(args.satellite, args.sector, args.product, zoom=0, timestamp=timestamp)
-    assert len(urls) == 1
-    image = await download_image(urls[0])
-    global TILE_SIZE
-    assert image.size[0] == image.size[1]
-    TILE_SIZE = image.size[0]
+    tile_cache = None
+    if args.cache_filename == 'memcached':
+        try:
+            tile_cache = MemcachedTileCache(['127.0.0.1'])
+        except ImportError:
+            pass
+    elif args.cache_filename:
+        try:
+            tile_cache = LevelDBTileCache(args.cache_filename)
+        except ImportError:
+            pass
 
-    # Compute zoom
-    zoom = int(args.zoom) if args.zoom else determine_zoom_level(max(args.width, args.height))
-
-    # Grab the rest of the URLs, stitch, and save
-    urls = build_image_urls(args.satellite, args.sector, args.product, zoom, timestamp)
-    images = await tornado.gen.multi([download_image(url) for url in urls])
-    stitched = stitch(images)
-
-    args._timestamp = timestamp
-    final = apply_filters(stitched, args)
+    final = await build_image(tile_cache, args)
     final.save(args.output_path)
 
 if __name__ == '__main__':
-    tornado.ioloop.IOLoop.current().run_sync(main)
+    tornado.ioloop.IOLoop.current().run_sync(script_main)
