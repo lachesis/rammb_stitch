@@ -44,6 +44,9 @@ class StitchHandler(tornado.web.RequestHandler):
 
         image = await build_image(g_tile_cache, args)
 
+        if filetype == 'jpg':
+            filetype = 'jpeg'
+
         ibytes = io.BytesIO()
         image.save(ibytes, format=filetype)
         self.set_header('Content-type', 'image/%s' % filetype)
@@ -52,7 +55,7 @@ class StitchHandler(tornado.web.RequestHandler):
 def make_app(args):
     return tornado.web.Application([
         # TODO: add routes that proxy and cache rammb-slider urls with open cors
-        (r"/(?P<satellite>[^/]*).(?P<filetype>png|jpg)", StitchHandler),
+        (r"/(?P<satellite>[^/]*).(?P<filetype>png|jpg|jpeg)", StitchHandler),
     ], debug=args.debug)
 
 def server_main():
