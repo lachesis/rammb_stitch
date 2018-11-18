@@ -64,6 +64,12 @@ def select_timestamp(target, options):
     if target == 'latest':
         return options[0]
 
+    try:
+        if int(target) in options:
+            return int(target)
+    except Exception:
+        pass
+
     import dateutil.parser
     target_dt = dateutil.parser.parse(target)
     nopts = [(abs((target_dt - opt).total_seconds()), opt) for opt in options]
