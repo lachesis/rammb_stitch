@@ -63,8 +63,12 @@ async def download_timestamps(satellite, sector, product, tile_cache=None):
 def select_timestamp(target, options):
     if target == 'latest':
         return options[0]
-    #import dateutil.parser
-    raise ValueError("Only 'latest' timestamp supported")
+
+    import dateutil.parser
+    target_dt = dateutil.parser.parse(target)
+    nopts = [(abs((target_dt - opt).total_seconds()), opt) for opt in options]
+    nopts.sort()
+    return nopts[0]
 
 def build_image_urls(satellite, sector, product, zoom, timestamp):
     base_url = 'http://rammb-slider.cira.colostate.edu/data/imagery/{date}/{satellite}---{sector}/{product}/{timestamp}/{zoom:02d}/{x:03d}_{y:03d}.png'

@@ -6,6 +6,7 @@ Pillow==5.3.0
 plyvel==1.0.5
 pylibmc==1.6.0
 pylint==2.1.1
+python-dateutil==2.7.5
 six==1.11.0
 tornado==5.1.1
 wrapt==1.10.11
