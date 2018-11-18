@@ -72,9 +72,9 @@ def select_timestamp(target, options):
 
     import dateutil.parser
     target_dt = dateutil.parser.parse(target)
-    nopts = [(abs((target_dt - opt).total_seconds()), opt) for opt in options]
+    nopts = [(abs((target_dt - dateutil.parser.parse(str(opt))).total_seconds()), opt) for opt in options]
     nopts.sort()
-    return nopts[0]
+    return nopts[0][1]
 
 def build_image_urls(satellite, sector, product, zoom, timestamp):
     base_url = 'http://rammb-slider.cira.colostate.edu/data/imagery/{date}/{satellite}---{sector}/{product}/{timestamp}/{zoom:02d}/{x:03d}_{y:03d}.png'
