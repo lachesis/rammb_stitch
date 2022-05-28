@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#http://rammb-slider.cira.colostate.edu/data/json/goes-16/full_disk/geocolor/latest_times.json!/usr/bin/python
 import argparse
 import tornado
 import tornado.ioloop
@@ -41,7 +41,7 @@ async def download_image(url, tile_cache=None):
     return Image.open(res.buffer)
 
 async def download_timestamps(satellite, sector, product, tile_cache=None):
-    url = 'http://rammb-slider.cira.colostate.edu/data/json/%s/%s/%s/latest_times.json' % (satellite, sector, product)
+    url = 'https://rammb-slider.cira.colostate.edu/data/json/%s/%s/%s/latest_times.json' % (satellite, sector, product)
 
     if tile_cache:
         data = tile_cache.get(url)
@@ -77,8 +77,13 @@ def select_timestamp(target, options):
     return nopts[0][1]
 
 def build_image_urls(satellite, sector, product, zoom, timestamp):
-    base_url = 'http://rammb-slider.cira.colostate.edu/data/imagery/{date}/{satellite}---{sector}/{product}/{timestamp}/{zoom:02d}/{x:03d}_{y:03d}.png'
+    base_url = 'https://rammb-slider.cira.colostate.edu/data/imagery/{date}/{satellite}---{sector}/{product}/{timestamp}/{zoom:02d}/{x:03d}_{y:03d}.png'
     max_x = max_y = 2 ** zoom
+
+    # e.g. timestamp: int = 20220528024020
+    ts = str(timestamp)
+    # e.g. date: str = 2022/05/28
+    date = '%s/%s/%s' % (ts[0:4], ts[4:6], ts[6:8])
 
     return [base_url.format(
         satellite=satellite,
@@ -86,7 +91,7 @@ def build_image_urls(satellite, sector, product, zoom, timestamp):
         product=product,
         zoom=zoom,
         timestamp=timestamp,
-        date=str(timestamp)[:8],
+        date=date,
         x=x, y=y
     ) for x in range(0, max_x) for y in range(0, max_y)]
 
